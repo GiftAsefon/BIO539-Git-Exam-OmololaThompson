@@ -13,10 +13,5 @@ How to Use This Repository
 Clone the repository:
 
 ``
-git clone https://github.com/GiftAsefon/BIO539-Git-Exam-GiftAsefon.git
+git clone git@github.com:lohlar-cmd/BIO539-Git-Exam-OmololaThompson.git
 ``
-
-
-
-
- 
