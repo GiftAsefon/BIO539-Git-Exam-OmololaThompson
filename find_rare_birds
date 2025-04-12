@@ -1,0 +1,246 @@
+#!/usr/bin/bash
+
+# Script: find_rare_birds
+# Description: Identifies rare bird sightings from FeederWatch CSV datasets (US locations only)
+# Usage: find_rare_birds [list of csv files]
+
+# Check if csv file(s) were provided and  return error if no file provided
+if [ $# -eq 0 ]; then
+    echo "Error: No CSV files provided"
+    echo "Usage: find_rare_birds [list of csv files]"
+    exit 1
+fi
+
+# Define output filenames
+ONCE_OVERALL="rare_birds_overall_us.csv"
+ONCE_YEARLY="rare_birds_yearly_us.csv"
+TEMP_DIR=$(mktemp -d)
+
+echo "Temporary directory created at: $TEMP_DIR"
+
+# Create temporary files to process the observation, bird information and merge csv files
+TEMP_OBSERVATIONS="${TEMP_DIR}/observations_us.csv"
+TEMP_BIRD_INFO="${TEMP_DIR}/bird_info.csv"
+MERGED_CSV="${TEMP_DIR}/merged_data.csv"
+
+# Function to clean up the temporary files originally created when completed
+cleanup() {
+    rm -rf "${TEMP_DIR}"
+}
+
+# Set trap to ensure cleanup on exit
+trap cleanup EXIT
+
+# Download bird information from feederwatch as reference dataset
+echo "Downloading reference data..."
+curl -s "https://feederwatch.org/wp-content/uploads/2022/08/PFW-species-translation-table.csv" > "${TEMP_BIRD_INFO}"
+
+# Initialize the observations file based on the specified format
+echo "species_code,year,loc_id,country,latitude,longitude,state" > "${TEMP_OBSERVATIONS}"
+
+# Function to extract header fields from CSV files
+extract_column_indices() {
+    local header="$1"
+    
+    IFS=',' read -ra HEADER_FIELDS <<< "$header"
+    
+    valid_col=-1
+    species_col=-1
+    year_col=-1
+    loc_id_col=-1
+    subnational_col=-1
+    lat_col=-1
+    long_col=-1
+    
+    i=0
+    for field in "${HEADER_FIELDS[@]}"; do
+        field_upper=$(echo "$field" | tr '[:lower:]' '[:upper:]')
+        
+        if [[ "$field_upper" == "VALID" ]]; then
+            valid_col=$i
+        elif [[ "$field_upper" == "SPECIES_CODE" ]]; then
+            species_col=$i
+        elif [[ "$field_upper" == "YEAR" ]]; then
+            year_col=$i
+        elif [[ "$field_upper" == "LOC_ID" ]]; then
+            loc_id_col=$i
+        elif [[ "$field_upper" == "SUBNATIONAL1_CODE" ]] || [[ "$field_upper" == *"SUBNATIONAL"* ]]; then
+            subnational_col=$i
+        elif [[ "$field_upper" == *"LATITUDE"* ]]; then
+            lat_col=$i
+        elif [[ "$field_upper" == *"LONGITUDE"* ]]; then
+            long_col=$i
+        fi
+        i=$((i+1))
+    done
+    
+    # Output the column indices to be captured and displayed to the users
+    echo "$valid_col $species_col $year_col $loc_id_col $subnational_col $lat_col $long_col"
+}
+ 
+# Process and merge input files
+echo "Processing and merging input files (US locations only)..."
+
+# Create a combined data file with all necessary columns
+echo "file_source,species_code,year,loc_id,latitude,longitude,subnational_code,valid" > "${MERGED_CSV}"
+
+for file in "$@"; do
+    if [ ! -f "$file" ]; then
+        echo "Warning: File $file does not exist, skipping."
+        continue
+    fi
+    
+    # Get a short name for the file for reference data
+    file_short=$(basename "$file")
+    
+    # Extract header and column indices
+    header=$(head -n 1 "$file")
+    column_output=$(extract_column_indices "$header")
+    read valid_col species_col year_col loc_id_col subnational_col lat_col long_col <<< "$column_output"
+    
+    # Debug output
+    echo "File: $file"
+    echo "Columns found - VALID: $valid_col, SPECIES_CODE: $species_col, YEAR: $year_col, LOC_ID: $loc_id_col"
+    echo "               SUBNATIONAL: $subnational_col, LATITUDE: $lat_col, LONGITUDE: $long_col"
+    
+    if [ $valid_col -eq -1 ] || [ $species_col -eq -1 ] || [ $year_col -eq -1 ] || [ $loc_id_col -eq -1 ] || [ $subnational_col -eq -1 ]; then
+        echo "Warning: Required columns not found in $file. Skipping."
+        continue
+    fi
+    
+    # Extract and merge data
+    echo "  Merging data from $file_short..."
+    
+    # Process each line and add to merged CSV
+    tail -n +2 "$file" | while IFS=, read -ra FIELDS; do
+        # Check if we have enough fields
+        field_count=${#FIELDS[@]}
+        
+        if [ $field_count -gt $valid_col ] && [ $field_count -gt $species_col ] && \
+           [ $field_count -gt $year_col ] && [ $field_count -gt $loc_id_col ] && \
+           [ $field_count -gt $subnational_col ]; then
+            
+            valid="${FIELDS[$valid_col]}"
+            species="${FIELDS[$species_col]}"
+            year="${FIELDS[$year_col]}"
+            loc_id="${FIELDS[$loc_id_col]}"
+            subnational="${FIELDS[$subnational_col]}"
+            
+            # Default values for optional fields
+            latitude="Unknown"
+            longitude="Unknown"
+            
+            # Extract latitude and longitude if available
+            if [ $lat_col -ne -1 ] && [ $field_count -gt $lat_col ]; then
+                latitude="${FIELDS[$lat_col]}"
+            fi
+            
+            if [ $long_col -ne -1 ] && [ $field_count -gt $long_col ]; then
+                longitude="${FIELDS[$long_col]}"
+            fi
+            
+            # Add to merged CSV
+            echo "$file_short,$species,$year,$loc_id,$latitude,$longitude,$subnational,$valid" >> "${MERGED_CSV}"
+        fi
+    done
+done
+
+# Check if we have merged data
+merged_count=$(wc -l < "${MERGED_CSV}")
+if [ $merged_count -le 1 ]; then
+    echo "Error: No valid data found in the provided files."
+    exit 1
+fi
+
+echo "Successfully merged $(($merged_count - 1)) records from all input files."
+
+# Filter for US locations and extract observations
+echo "Filtering for US locations only..."
+tail -n +2 "${MERGED_CSV}" | while IFS=, read -r file_source species_code year loc_id latitude longitude subnational valid; do
+    # Check if valid is 1 and location is in the US
+    if [[ "$valid" == "1" ]] && [[ "$subnational" == US-* ]]; then
+        state=$(echo "${subnational}" | cut -d- -f2)
+        echo "$species_code,$year,$loc_id,US,$latitude,$longitude,$state" >> "${TEMP_OBSERVATIONS}"
+    fi
+done
+
+# Check if we have US observations
+obs_count=$(wc -l < "${TEMP_OBSERVATIONS}")
+if [ $obs_count -le 1 ]; then
+    echo "Error: No valid US observations found in the provided files."
+    echo "Contents of observations file (first 10 lines):"
+    head -n 10 "${TEMP_OBSERVATIONS}"
+    exit 1
+fi
+
+echo "Found $(($obs_count - 1)) valid US observations."
+
+# Count species observations overall
+echo "Identifying rare species overall in US locations..."
+cat "${TEMP_OBSERVATIONS}" | tail -n +2 | cut -d, -f1 | sort | uniq -c > "${TEMP_DIR}/overall_counts_us.txt"
+
+# Count species observations once by year
+echo "Identifying rare species by year in US locations..."
+cat "${TEMP_OBSERVATIONS}" | tail -n +2 | cut -d, -f1,2 | sort | uniq -c > "${TEMP_DIR}/yearly_counts_us.txt"
+
+# Create headers for output files
+echo "species_code,scientific_name,common_name,year,loc_id,latitude,longitude,state" > "${ONCE_OVERALL}"
+echo "species_code,scientific_name,common_name,year,loc_id,latitude,longitude,state" > "${ONCE_YEARLY}"
+
+# Process species observed once overall
+echo "Generating overall rare bird report for US locations..."
+grep "^ *1 " "${TEMP_DIR}/overall_counts_us.txt" | while read -r count species_code; do
+    # Get the first observation of this species
+    observation=$(grep "^${species_code}," "${TEMP_OBSERVATIONS}" | head -1)
+    year=$(echo "${observation}" | cut -d, -f2)
+    loc_id=$(echo "${observation}" | cut -d, -f3)
+    latitude=$(echo "${observation}" | cut -d, -f5)
+    longitude=$(echo "${observation}" | cut -d, -f6)
+    state=$(echo "${observation}" | cut -d, -f7)
+    
+    # Get bird information (gracefully handle missing info)
+    sci_name=$(grep -i "^\"${species_code}\"," "${TEMP_BIRD_INFO}" | cut -d, -f4 | sed 's/"//g')
+    if [ -z "$sci_name" ]; then sci_name="Unknown"; fi
+
+    common_name=$(grep -i "^\"${species_code}\"," "${TEMP_BIRD_INFO}" | cut -d, -f5 | sed 's/"//g')
+    if [ -z "$common_name" ]; then common_name="Unknown"; fi
+    
+    # Output result
+    echo "${species_code},${sci_name},${common_name},${year},${loc_id},${latitude},${longitude},${state}" >> "${ONCE_OVERALL}"
+done
+
+# Process species observed once per year
+echo "Generating yearly rare bird report for US locations..."
+grep "^ *1 " "${TEMP_DIR}/yearly_counts_us.txt" | while read -r count species_year; do
+    species_code=$(echo "${species_year}" | cut -d, -f1)
+    year=$(echo "${species_year}" | cut -d, -f2)
+
+    # Get the first observation of this species in this year
+    observation=$(grep "^${species_code},${year}," "${TEMP_OBSERVATIONS}" | head -1)
+    loc_id=$(echo "${observation}" | cut -d, -f3)
+    latitude=$(echo "${observation}" | cut -d, -f5)
+    longitude=$(echo "${observation}" | cut -d, -f6)
+    state=$(echo "${observation}" | cut -d, -f7)
+
+    # Get bird information (gracefully handle missing info)
+    sci_name=$(grep -i "^\"${species_code}\"," "${TEMP_BIRD_INFO}" | cut -d, -f4 | sed 's/"//g')
+    if [ -z "$sci_name" ]; then sci_name="Unknown"; fi
+
+    common_name=$(grep -i "^\"${species_code}\"," "${TEMP_BIRD_INFO}" | cut -d, -f5 | sed 's/"//g')
+    if [ -z "$common_name" ]; then common_name="Unknown"; fi
+    
+    # Output result
+    echo "${species_code},${sci_name},${common_name},${year},${loc_id},${latitude},${longitude},${state}" >> "${ONCE_YEARLY}"
+done
+
+# Report results
+overall_count=$(tail -n +2 "${ONCE_OVERALL}" | wc -l)
+yearly_count=$(tail -n +2 "${ONCE_YEARLY}" | wc -l)
+
+echo "Analysis complete (US locations only):"
+echo "- Found ${overall_count} species observed exactly once overall in US locations"
+echo "- Found ${yearly_count} species observed exactly once in a particular year in US locations"
+echo "- Results saved to ${ONCE_OVERALL} and ${ONCE_YEARLY}"
+
+echo "Script completed successfully"
+exit 0
