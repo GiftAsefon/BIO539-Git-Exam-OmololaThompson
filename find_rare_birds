@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 
 # Script: find_rare_birds
 # Description: Identifies rare bird sightings from FeederWatch CSV datasets (US locations only)
@@ -233,7 +233,7 @@ grep "^ *1 " "${TEMP_DIR}/yearly_counts_us.txt" | while read -r count species_ye
     echo "${species_code},${sci_name},${common_name},${year},${loc_id},${latitude},${longitude},${state}" >> "${ONCE_YEARLY}"
 done
 
-# Report results
+# Summary of Report results
 overall_count=$(tail -n +2 "${ONCE_OVERALL}" | wc -l)
 yearly_count=$(tail -n +2 "${ONCE_YEARLY}" | wc -l)
 
